@@ -65,6 +65,9 @@ def schema_for_column_datatype(c):
     #remove any array notation from type information as we use a separate field for that
     data_type = c.sql_data_type.lower().replace('[]', '')
 
+    # DP: set unknown data types to string by default
+    schema['type'] = nullable_column('string', c.is_primary_key)
+
     if data_type in INTEGER_TYPES:
         schema['type'] = nullable_column('integer', c.is_primary_key)
         schema['minimum'] = -1 * (2**(c.numeric_precision - 1))
@@ -221,6 +224,7 @@ def schema_for_column(c):
     else:
         #custom datatypes like enums
         column_schema['items'] = {'$ref': '#/definitions/sdc_recursive_string_array'}
+
     return column_schema
 
 
@@ -308,12 +312,20 @@ def write_sql_data_type_md(mdata, col_info):
     return mdata
 
 
-BASE_RECURSIVE_SCHEMAS = {'sdc_recursive_integer_array'   : {'type' : ['null', 'integer', 'array'], 'items' : {'$ref': '#/definitions/sdc_recursive_integer_array'}},
-                          'sdc_recursive_number_array'    : {'type' : ['null', 'number', 'array'], 'items'  : {'$ref': '#/definitions/sdc_recursive_number_array'}},
-                          'sdc_recursive_string_array'    : {'type' : ['null', 'string', 'array'], 'items'  : {'$ref': '#/definitions/sdc_recursive_string_array'}},
-                          'sdc_recursive_boolean_array'   : {'type' : ['null', 'boolean', 'array'], 'items' : {'$ref': '#/definitions/sdc_recursive_boolean_array'}},
-                          'sdc_recursive_timestamp_array' : {'type' : ['null', 'string', 'array'], 'format' : 'date-time', 'items' : {'$ref': '#/definitions/sdc_recursive_timestamp_array'}},
-                          'sdc_recursive_object_array'    : {'type' : ['null', 'object', 'array'], 'items' : {'$ref': '#/definitions/sdc_recursive_object_array'}}}
+BASE_RECURSIVE_SCHEMAS = {'sdc_recursive_integer_array'   : {'type' : ['null', 'integer']},
+                          'sdc_recursive_number_array'    : {'type' : ['null', 'number']},
+                          'sdc_recursive_string_array'    : {'type' : ['null', 'string']},
+                          'sdc_recursive_boolean_array'   : {'type' : ['null', 'boolean']},
+                          'sdc_recursive_timestamp_array' : {'type' : ['null', 'string'], 'format' : 'date-time'},
+                          'sdc_recursive_object_array'    : {'type' : ['null', 'object']}}
+
+# DP: removed recursive array definitions as target-redshift doesn't support them
+# BASE_RECURSIVE_SCHEMAS = {'sdc_recursive_integer_array'   : {'type' : ['null', 'integer', 'array'], 'items' : {'$ref': '#/definitions/sdc_recursive_integer_array'}},
+#                           'sdc_recursive_number_array'    : {'type' : ['null', 'number', 'array'], 'items'  : {'$ref': '#/definitions/sdc_recursive_number_array'}},
+#                           'sdc_recursive_string_array'    : {'type' : ['null', 'string', 'array'], 'items'  : {'$ref': '#/definitions/sdc_recursive_string_array'}},
+#                           'sdc_recursive_boolean_array'   : {'type' : ['null', 'boolean', 'array'], 'items' : {'$ref': '#/definitions/sdc_recursive_boolean_array'}},
+#                           'sdc_recursive_timestamp_array' : {'type' : ['null', 'string', 'array'], 'format' : 'date-time', 'items' : {'$ref': '#/definitions/sdc_recursive_timestamp_array'}},
+#                           'sdc_recursive_object_array'    : {'type' : ['null', 'object', 'array'], 'items' : {'$ref': '#/definitions/sdc_recursive_object_array'}}}
 
 def include_array_schemas(columns, schema):
     schema['definitions'] = copy.deepcopy(BASE_RECURSIVE_SCHEMAS)
@@ -693,7 +705,9 @@ def main_impl():
 
     post_db.include_schemas_in_destination_stream_name = (args.config.get('include_schemas_in_destination_stream_name') == 'true')
 
-    post_db.get_ssl_status(conn_config)
+    # DP: commented out as it caused problems. This comment is older than the change
+    # so no details can be provided as to why is it like so
+    # post_db.get_ssl_status(conn_config)
 
     if args.discover:
         do_discovery(conn_config)
