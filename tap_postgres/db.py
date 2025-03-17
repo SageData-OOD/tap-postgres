@@ -51,7 +51,11 @@ def open_connection(conn_config, logical_replication=False):
         'user': conn_config['user'],
         'password': conn_config['password'],
         'port': conn_config['port'],
-        'connect_timeout': 30
+        'connect_timeout': 30,
+        'keepalives': 1,            # Enable TCP keep-alive
+        'keepalives_idle': 600,     # Start keep-alives after 10 minutes of inactivity
+        'keepalives_interval': 60,  # Retry every 60 seconds if no response
+        'keepalives_count': 5       # Drop connection after 5 failed probes
     }
 
     if conn_config.get('sslmode'):
