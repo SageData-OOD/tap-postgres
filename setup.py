@@ -12,6 +12,7 @@ setup(name='tap-postgres',
           'singer-python==5.3.1',
           'psycopg2-binary==2.9.3',
           'strict-rfc3339==0.7',
+          'paramiko<3.0.0',  # Add paramiko with version constraint for SSH tunnel compatibility
       ],
       extras_require={
           'dev': [
