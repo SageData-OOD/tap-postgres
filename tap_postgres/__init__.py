@@ -236,9 +236,40 @@ def schema_for_column(c):
 #this seems to identify all arrays:
 #select typname from pg_attribute  as pga join pg_type as pgt on pgt.oid = pga.atttypid  where typlen = -1 and typelem != 0 and pga.attndims > 0;
 def produce_table_info(conn):
+    LOGGER.info("Starting table discovery with updated privilege check (table-level OR column-level SELECT)")
     with conn.cursor(cursor_factory=psycopg2.extras.DictCursor, name='stitch_cursor') as cur:
         cur.itersize = post_db.cursor_iter_size
         table_info = {}
+        
+        # First, run a diagnostic query to see what tables exist and their privileges
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as diag_cur:
+            diag_cur.execute("""
+                SELECT 
+                    n.nspname AS schema_name,
+                    c.relname AS table_name,
+                    c.relkind,
+                    has_table_privilege(c.oid, 'SELECT') AS has_table_select,
+                    COUNT(DISTINCT a.attname) FILTER (WHERE has_column_privilege(c.oid, a.attname, 'SELECT') = true) AS columns_with_select,
+                    COUNT(DISTINCT a.attname) AS total_columns
+                FROM pg_class c
+                JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                LEFT JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+                WHERE c.relkind IN ('r', 'v', 'm', 'p')
+                AND n.nspname NOT IN ('pg_toast', 'pg_catalog', 'information_schema')
+                GROUP BY n.nspname, c.relname, c.relkind, c.oid
+                ORDER BY n.nspname, c.relname
+                LIMIT 20
+            """)
+            diag_results = diag_cur.fetchall()
+            if diag_results:
+                LOGGER.info("Diagnostic: Found %d tables/views in database. Sample:", len(diag_results))
+                for diag_row in diag_results[:5]:  # Log first 5
+                    LOGGER.info("  Schema: %s, Table: %s, Kind: %s, Has table SELECT: %s, Columns with SELECT: %s/%s", 
+                              diag_row['schema_name'], diag_row['table_name'], diag_row['relkind'],
+                              diag_row['has_table_select'], diag_row['columns_with_select'], diag_row['total_columns'])
+            else:
+                LOGGER.warning("Diagnostic: No tables found in pg_class matching criteria")
+        
           # SELECT CASE WHEN $2.typtype = 'd' THEN $2.typbasetype ELSE $1.atttypid END
         cur.execute("""
 SELECT
@@ -282,7 +313,9 @@ AND pg_class.relkind IN ('r', 'v', 'm', 'p')
 AND n.nspname NOT in ('pg_toast', 'pg_catalog', 'information_schema')
 AND (has_table_privilege(pg_class.oid, 'SELECT') = true 
      OR has_column_privilege(pg_class.oid, attname, 'SELECT') = true) """)
-        for row in cur.fetchall():
+        rows = cur.fetchall()
+        LOGGER.info("Discovery query returned %d column rows", len(rows))
+        for row in rows:
             row_count, is_view, schema_name, table_name, *col_info = row
 
             if table_info.get(schema_name) is None:
@@ -295,6 +328,18 @@ AND (has_table_privilege(pg_class.oid, 'SELECT') = true
 
             table_info[schema_name][table_name]['columns'][col_name] = Column(*col_info)
 
+        # Log summary of discovered tables
+        total_tables = sum(len(tables) for tables in table_info.values())
+        total_columns = sum(len(table['columns']) for schema in table_info.values() for table in schema.values())
+        schemas = list(table_info.keys())
+        LOGGER.info("Discovery complete: Found %d tables across %d schemas (%s) with %d total columns", 
+                   total_tables, len(schemas), ', '.join(schemas[:5]) if schemas else 'none', total_columns)
+        if total_tables > 0:
+            for schema_name in list(table_info.keys())[:3]:  # Log first 3 schemas
+                for table_name in list(table_info[schema_name].keys())[:3]:  # Log first 3 tables per schema
+                    col_count = len(table_info[schema_name][table_name]['columns'])
+                    LOGGER.info("  Discovered: %s.%s (%d columns)", schema_name, table_name, col_count)
+        
         return table_info
 
 def get_database_name(connection):
@@ -397,8 +442,10 @@ def discover_columns(connection, table_info):
     return entries
 
 def discover_db(connection):
+    LOGGER.info("discover_db: Starting discovery for current database")
     table_info = produce_table_info(connection)
     db_streams = discover_columns(connection, table_info)
+    LOGGER.info("discover_db: Generated %d stream entries from discovered tables", len(db_streams))
     return db_streams
 
 def attempt_connection_to_db(conn_config, dbname):
@@ -443,9 +490,10 @@ def do_discovery(conn_config):
         conn_config['dbname'] = dbname
         with post_db.open_connection(conn_config) as conn:
             db_streams = discover_db(conn)
+            LOGGER.info("Database %s discovery returned %d streams", dbname, len(db_streams))
             all_streams = all_streams + db_streams
 
-
+    LOGGER.info("Total discovery summary: %d streams found across all databases", len(all_streams))
     if len(all_streams) == 0:
         raise RuntimeError('0 tables were discovered across the entire cluster')
 
