@@ -241,6 +241,36 @@ def produce_table_info(conn):
         cur.itersize = post_db.cursor_iter_size
         table_info = {}
         
+        # First, check current user and roles
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as user_cur:
+            user_cur.execute("""
+                SELECT 
+                    current_user,
+                    session_user,
+                    current_database(),
+                    (SELECT array_agg(rolname) FROM pg_roles WHERE pg_has_role(current_user, oid, 'member')) AS roles
+            """)
+            user_info = user_cur.fetchone()
+            LOGGER.info("Current user: %s, Session user: %s, Database: %s, Roles: %s", 
+                       user_info['current_user'], user_info['session_user'], 
+                       user_info['current_database'], user_info['roles'])
+        
+        # Check schema privileges
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as schema_cur:
+            schema_cur.execute("""
+                SELECT 
+                    nspname AS schema_name,
+                    has_schema_privilege(nspname, 'USAGE') AS has_usage
+                FROM pg_namespace
+                WHERE nspname NOT IN ('pg_toast', 'pg_catalog', 'information_schema')
+                ORDER BY nspname
+            """)
+            schema_results = schema_cur.fetchall()
+            if schema_results:
+                LOGGER.info("Schema privileges:")
+                for schema_row in schema_results[:5]:
+                    LOGGER.info("  Schema: %s, Has USAGE: %s", schema_row['schema_name'], schema_row['has_usage'])
+        
         # First, run a diagnostic query to see what tables exist and their privileges
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as diag_cur:
             diag_cur.execute("""
@@ -249,6 +279,7 @@ def produce_table_info(conn):
                     c.relname AS table_name,
                     c.relkind,
                     has_table_privilege(c.oid, 'SELECT') AS has_table_select,
+                    has_schema_privilege(n.nspname, 'USAGE') AS has_schema_usage,
                     COUNT(DISTINCT a.attname) FILTER (WHERE has_column_privilege(c.oid, a.attname, 'SELECT') = true) AS columns_with_select,
                     COUNT(DISTINCT a.attname) AS total_columns
                 FROM pg_class c
@@ -264,9 +295,10 @@ def produce_table_info(conn):
             if diag_results:
                 LOGGER.info("Diagnostic: Found %d tables/views in database. Sample:", len(diag_results))
                 for diag_row in diag_results[:5]:  # Log first 5
-                    LOGGER.info("  Schema: %s, Table: %s, Kind: %s, Has table SELECT: %s, Columns with SELECT: %s/%s", 
+                    LOGGER.info("  Schema: %s, Table: %s, Kind: %s, Has schema USAGE: %s, Has table SELECT: %s, Columns with SELECT: %s/%s", 
                               diag_row['schema_name'], diag_row['table_name'], diag_row['relkind'],
-                              diag_row['has_table_select'], diag_row['columns_with_select'], diag_row['total_columns'])
+                              diag_row['has_schema_usage'], diag_row['has_table_select'], 
+                              diag_row['columns_with_select'], diag_row['total_columns'])
             else:
                 LOGGER.warning("Diagnostic: No tables found in pg_class matching criteria")
         
@@ -311,6 +343,7 @@ WHERE attnum > 0
 AND NOT a.attisdropped
 AND pg_class.relkind IN ('r', 'v', 'm', 'p')
 AND n.nspname NOT in ('pg_toast', 'pg_catalog', 'information_schema')
+AND has_schema_privilege(n.nspname, 'USAGE') = true
 AND (has_table_privilege(pg_class.oid, 'SELECT') = true 
      OR has_column_privilege(pg_class.oid, attname, 'SELECT') = true) """)
         rows = cur.fetchall()
@@ -495,7 +528,13 @@ def do_discovery(conn_config):
 
     LOGGER.info("Total discovery summary: %d streams found across all databases", len(all_streams))
     if len(all_streams) == 0:
-        raise RuntimeError('0 tables were discovered across the entire cluster')
+        error_msg = ('0 tables were discovered across the entire cluster. '
+                    'This usually means the database user lacks the necessary privileges. '
+                    'The user needs: (1) USAGE privilege on schemas containing tables, '
+                    'and (2) SELECT privilege on tables (table-level or column-level). '
+                    'Check the diagnostic logs above for details on which tables exist and their privilege status.')
+        LOGGER.error(error_msg)
+        raise RuntimeError(error_msg)
 
     dump_catalog(all_streams)
     return all_streams
